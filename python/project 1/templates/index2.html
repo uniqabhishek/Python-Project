@@ -1,0 +1,306 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Voice Assistant</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --accent: #4f8cff;
+    --accent-dim: #2a3f66;
+    --text: #e8ecf1;
+    --muted: #8b93a1;
+    --user: #7dd3fc;
+    --bot: #a5b4fc;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 2rem 1rem;
+  }
+  h1 { margin: 0 0 0.25rem; font-size: 1.6rem; }
+  .sub { color: var(--muted); font-size: 0.9rem; margin-bottom: 1.5rem; }
+
+  .chat {
+    width: min(720px, 100%);
+    flex: 1;
+    background: var(--panel);
+    border-radius: 16px;
+    padding: 1rem;
+    overflow-y: auto;
+    max-height: 55vh;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.4);
+  }
+  .msg {
+    max-width: 80%;
+    padding: 0.6rem 0.9rem;
+    border-radius: 12px;
+    line-height: 1.4;
+    font-size: 0.95rem;
+    word-wrap: break-word;
+  }
+  .msg.user { align-self: flex-end; background: #1e3a5f; color: var(--user); }
+  .msg.bot  { align-self: flex-start; background: #232838; color: var(--bot); }
+  .msg.sys  { align-self: center; color: var(--muted); font-size: 0.8rem; background: none; }
+
+  .controls {
+    width: min(720px, 100%);
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 1rem;
+  }
+  input[type="text"] {
+    flex: 1;
+    padding: 0.8rem 1rem;
+    border-radius: 12px;
+    border: 1px solid #2a2f3a;
+    background: #12141a;
+    color: var(--text);
+    font-size: 1rem;
+    outline: none;
+  }
+  input[type="text"]:focus { border-color: var(--accent); }
+
+  button {
+    padding: 0 1.1rem;
+    border-radius: 12px;
+    border: none;
+    background: var(--accent);
+    color: white;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s, transform 0.1s;
+  }
+  button:hover { background: #3b74e0; }
+  button:active { transform: scale(0.97); }
+  button:disabled { background: #2a3f66; cursor: not-allowed; }
+
+  #micBtn.listening {
+    background: #e11d48;
+    animation: pulse 1.2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(225,29,72,0.6); }
+    70%  { box-shadow: 0 0 0 14px rgba(225,29,72,0); }
+    100% { box-shadow: 0 0 0 0 rgba(225,29,72,0); }
+  }
+
+  .status {
+    margin-top: 0.75rem;
+    font-size: 0.85rem;
+    color: var(--muted);
+    min-height: 1.2em;
+  }
+  .warn { color: #f59e0b; }
+</style>
+</head>
+<body>
+
+  <h1>🎙️ Voice Assistant</h1>
+  <div class="sub">Speak or type. Try "what time is it", "open youtube", "search cats".</div>
+
+  <div class="chat" id="chat"></div>
+
+  <div class="controls">
+    <input
+      id="textInput"
+      type="text"
+      placeholder="Type a command…"
+      autocomplete="off"
+    />
+    <button id="sendBtn" title="Send">Send</button>
+    <button id="micBtn" title="Hold to talk">🎤</button>
+  </div>
+
+  <div class="status" id="status"></div>
+
+<script>
+(() => {
+  "use strict";
+
+  const chatEl   = document.getElementById("chat");
+  const inputEl  = document.getElementById("textInput");
+  const sendBtn  = document.getElementById("sendBtn");
+  const micBtn   = document.getElementById("micBtn");
+  const statusEl = document.getElementById("status");
+
+  // ---------- feature detection ----------
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const TTS_OK = "speechSynthesis" in window;
+
+  let recognition = null;
+  let listening = false;
+  let voiceEnabled = true;
+
+  // ---------- UI helpers ----------
+  function addMsg(text, cls) {
+    const div = document.createElement("div");
+    div.className = `msg ${cls}`;
+    div.textContent = text;
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+    return div;
+  }
+
+  function setStatus(msg, warn = false) {
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (warn ? " warn" : "");
+  }
+
+  function speak(text) {
+    if (!TTS_OK || !voiceEnabled) return;
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      // Prefer an English voice
+      const voices = window.speechSynthesis.getVoices();
+      const en = voices.find(v => /en[-_]?/i.test(v.lang));
+      if (en) u.voice = en;
+      window.speechSynthesis.speak(u);
+    } catch (e) {
+      console.warn("TTS failed:", e);
+      voiceEnabled = false;
+    }
+  }
+
+  // ---------- backend call ----------
+  async function sendCommand(cmd) {
+    if (!cmd || !cmd.trim()) return;
+    addMsg(cmd, "user");
+    setStatus("Thinking…");
+
+    try {
+      const res = await fetch("/api/command", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ command: cmd }),
+      });
+
+      if (!res.ok) throw new Error(`Server returned ${res.status}`);
+      const data = await res.json();
+
+      addMsg(data.text, "bot");
+      speak(data.text);
+
+      if (data.open_url) {
+        // Open in a new tab. Some browsers block popups triggered
+        // from async code, so fall back to a manual link.
+        const w = window.open(data.open_url, "_blank", "noopener");
+        if (!w) {
+          const a = document.createElement("a");
+          a.href = data.open_url;
+          a.target = "_blank";
+          a.rel = "noopener";
+          a.textContent = `🔗 Open ${data.open_url}`;
+          const p = addMsg("", "bot");
+          p.appendChild(a);
+        }
+      }
+
+      setStatus(data.exit ? "Session ended. Refresh to start again." : "Ready.");
+    } catch (err) {
+      console.error(err);
+      addMsg("Sorry, something went wrong talking to the server.", "bot");
+      setStatus("Network error.", true);
+    }
+  }
+
+  // ---------- typed input ----------
+  sendBtn.addEventListener("click", () => {
+    const v = inputEl.value;
+    inputEl.value = "";
+    sendCommand(v);
+  });
+
+  inputEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      const v = inputEl.value;
+      inputEl.value = "";
+      sendCommand(v);
+    }
+  });
+
+  // ---------- speech recognition ----------
+  if (!SR) {
+    micBtn.disabled = true;
+    micBtn.title = "Speech recognition not supported in this browser";
+    setStatus("⚠️ Speech recognition unavailable — use Chrome, Edge, or Safari.", true);
+  } else {
+    recognition = new SR();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false;
+
+    recognition.onstart = () => {
+      listening = true;
+      micBtn.classList.add("listening");
+      setStatus("🎤 Listening… speak now.");
+    };
+
+    recognition.onend = () => {
+      listening = false;
+      micBtn.classList.remove("listening");
+      setStatus("Ready.");
+    };
+
+    recognition.onerror = (e) => {
+      listening = false;
+      micBtn.classList.remove("listening");
+      const msgs = {
+        "not-allowed":     "Microphone permission denied.",
+        "no-speech":       "No speech detected.",
+        "audio-capture":   "No microphone found.",
+        "network":         "Network error during recognition.",
+        "aborted":         "Recognition aborted.",
+      };
+      setStatus(`⚠️ ${msgs[e.error] || e.error}`, true);
+    };
+
+    recognition.onresult = (e) => {
+      const transcript = e.results[0][0].transcript;
+      sendCommand(transcript);
+    };
+
+    micBtn.addEventListener("click", () => {
+      if (listening) {
+        recognition.stop();
+        return;
+      }
+      try {
+        recognition.start();
+      } catch (e) {
+        // start() throws if called twice quickly
+        console.warn("recognition.start failed:", e);
+      }
+    });
+  }
+
+  // ---------- voice warm-up (Chrome loads voices async) ----------
+  if (TTS_OK) {
+    window.speechSynthesis.onvoiceschanged = () => {};
+    window.speechSynthesis.getVoices();
+  }
+
+  addMsg("Hi! I'm your voice assistant. Press 🎤 to talk or type a command.", "bot");
+  setStatus("Ready.");
+})();
+</script>
+</body>
+</html>
